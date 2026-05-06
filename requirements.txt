@@ -1,0 +1,7 @@
+discord
+python-dotenv
+easy-pil
+openai
+langgraph
+PyGithub
+GitPython
