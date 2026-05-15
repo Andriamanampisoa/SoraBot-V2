@@ -25,6 +25,7 @@ from models.chat_agent_utils import (
     parse_json_object,
 )
 from models.conversation_memory import ConversationMemory
+from models.llm import LLMClient
 from models.github_tools import GitHubTools
 from models.github_exceptions import GitHubAuthenticationError
 
@@ -33,6 +34,7 @@ class AgentState(TypedDict, total=False):
     author_name: str
     channel_name: str
     user_id: str
+    api_key: Optional[str]
     conversation_history: list[dict]
     request_type: str
     target_repo: str
@@ -56,6 +58,18 @@ class DiscordChatAgent:
         self.memory = ConversationMemory(memory_dir=self.repo_root / "conversation_memory")
         self.workflow = self._build_workflow()
 
+    def _chat_with_llm(self, llm_prompt, temperature=0.2, api_key: str | None = None):
+        """
+        Helper to call the LLM. If `api_key` is provided, instantiate a temporary LLMClient using that key.
+        """
+        try:
+            if api_key:
+                client = LLMClient(api_key=api_key)
+                return client.chat(llm_prompt, temperature=temperature)
+            return self.llm_client.chat(llm_prompt, temperature=temperature)
+        except Exception as exc:
+            return f"Erreur LLM: {exc}"
+
     def _build_workflow(self):
         """
         Build the agent's workflow graph.
@@ -73,21 +87,20 @@ class DiscordChatAgent:
         return graph.compile()
 
     def handle_message(self, message: str, author_name: str, channel_name: str,
-         user_id: Optional[str] = None) -> str:
+            user_id: Optional[str] = None, api_key: Optional[str] = None) -> str:
         """
         Main entry point to handle an incoming message and generate a response.
         """
-        # Generate user_id if not provided => use author_name as fallback
         if not user_id:
             user_id = author_name
 
-        # Load conversation history for this user
         conversation_history = self.memory.get_conversation_history(user_id, max_messages=10)
         state = {
             "message": message.strip(),
             "author_name": author_name,
             "channel_name": channel_name,
             "user_id": user_id,
+            "api_key": api_key,
             "conversation_history": conversation_history,
             "execution_log": "",
         }
@@ -102,7 +115,11 @@ class DiscordChatAgent:
         """
         message = state.get("message", "")
         conversation_history = state.get("conversation_history", [])
-        llm_intent = self._extract_intent_with_llm(message, conversation_history)
+        llm_intent = self._extract_intent_with_llm(
+            message,
+            conversation_history,
+            api_key=state.get("api_key"),
+        )
         request_type = llm_intent.get("request_type")
 
         if not request_type:
@@ -502,7 +519,8 @@ class DiscordChatAgent:
             conversation_history=conversation_history,
         )
 
-        response = self.llm_client.chat(prompt, temperature=0.2)
+        api_key = state.get("api_key")
+        response = self._chat_with_llm(prompt, temperature=0.2, api_key=api_key)
         if state.get("github_pr_url"):
             response += f"\n\nPR URL: {state['github_pr_url']}"
         if state.get("github_branch"):
@@ -628,7 +646,12 @@ class DiscordChatAgent:
             conversation_history=conversation_history,
         )
 
-    def _extract_intent_with_llm(self, message: str, conversation_history: list[dict] | None = None) -> dict:
+    def _extract_intent_with_llm(
+        self,
+        message: str,
+        conversation_history: list[dict] | None = None,
+        api_key: str | None = None,
+    ) -> dict:
         """
         Use the LLM to extract action parameters from free-form text, with conversation context.
         """
@@ -673,7 +696,7 @@ class DiscordChatAgent:
             },
         ]
 
-        response = self.llm_client.chat(prompt, temperature=0)
+        response = self._chat_with_llm(prompt, temperature=0, api_key=api_key)
         cleaned = (response or "").strip()
         if cleaned.startswith("Erreur LLM"):
             return {}
@@ -715,7 +738,7 @@ class DiscordChatAgent:
             pull_request_template=pull_request_template,
         )
 
-        response = self.llm_client.chat(prompt, temperature=0.2)
+        response = self._chat_with_llm(prompt, temperature=0.2, api_key=state.get("api_key"))
         parsed = parse_json_object((response or "").strip())
         if parsed.get("title") and parsed.get("body"):
             return {"title": parsed["title"], "body": parsed["body"]}

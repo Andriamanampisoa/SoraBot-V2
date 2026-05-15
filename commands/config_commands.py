@@ -60,6 +60,7 @@ CONFIG_REMOVABLE_SETTINGS = [
     app_commands.Choice(name="Bot chat channel", value="bot_chat_channel_id"),
     app_commands.Choice(name="Startup announcement channel", value="startup_announcement_channel_id"),
     app_commands.Choice(name="Welcome role", value="welcome_role_id"),
+    app_commands.Choice(name="OpenRouter API key", value="openrouter_api_key"),
 ]
 
 def build_config_embed(guild: discord.Guild | None, config: dict[str, str]) -> discord.Embed:
@@ -89,6 +90,11 @@ def build_config_embed(guild: discord.Guild | None, config: dict[str, str]) -> d
     embed.add_field(
         name="Welcome role",
         value=_display_role(guild, config.get("welcome_role_id")),
+        inline=False,
+    )
+    embed.add_field(
+        name="OpenRouter key",
+        value=("Set" if config.get("openrouter_api_key") else "Not set"),
         inline=False,
     )
     return embed
@@ -313,6 +319,26 @@ class ServerConfigCommands(commands.Cog):
         self.config_store.update_setting(str(interaction.guild.id), "startup_announcement_channel_id", str(channel.id))
         embed = build_config_embed(interaction.guild, self.config_store.get_guild_config(str(interaction.guild.id)))
         await interaction.response.send_message("Startup announcement channel updated.", embed=embed, ephemeral=True)
+
+    @config.command(name="set-openrouter-key", description="Set the OpenRouter API key for this server (encrypted)")
+    @app_commands.guild_only()
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(key="The OpenRouter API key to use for this server")
+    async def config_set_openrouter_key(self, interaction: discord.Interaction, key: str):
+        """
+        Store the OpenRouter API key for the server in encrypted storage.
+        """
+        if interaction.guild is None:
+            await interaction.response.send_message("This command must be used in a server.", ephemeral=True)
+            return
+
+        success = self.config_store.update_setting(str(interaction.guild.id), "openrouter_api_key", key)
+        if not success:
+            await interaction.response.send_message("Could not save the API key.", ephemeral=True)
+            return
+
+        embed = build_config_embed(interaction.guild, self.config_store.get_guild_config(str(interaction.guild.id)))
+        await interaction.response.send_message("OpenRouter API key saved (encrypted).", embed=embed, ephemeral=True)
 
     @config.command(name="set-welcome-role", description="Set the welcome role")
     @app_commands.guild_only()

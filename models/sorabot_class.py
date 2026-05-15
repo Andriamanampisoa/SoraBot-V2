@@ -96,6 +96,17 @@ class Sorabot(commands.Bot):
         except (TypeError, ValueError):
             return None
 
+    def _get_openrouter_api_key(self, guild_id: int | str | None) -> str | None:
+        """
+        Return the effective OpenRouter API key for a guild, or the global fallback.
+        """
+        key = self._get_guild_setting(guild_id, "openrouter_api_key", "OPENROUTER_API_KEY")
+        if key is None:
+            return None
+
+        stripped_key = str(key).strip()
+        return stripped_key or None
+
     async def _announce_startup(self) -> None:
         """
         Announce the bot's startup to configured channels.
@@ -154,6 +165,17 @@ class Sorabot(commands.Bot):
             await self.process_commands(message)
             return
 
+        openrouter_key = self._get_openrouter_api_key(guild_id)
+
+        if not openrouter_key and not os.getenv("OPENAI_API_KEY"):
+            guild_label = f"guild `{message.guild.name}` ({message.guild.id})" if message.guild else "this server"
+            await message.reply(
+                f"The OpenRouter API key is not configured for {guild_label}.",
+                mention_author=False,
+            )
+            await self.process_commands(message)
+            return
+
         async with message.channel.typing():
             response = await asyncio.to_thread(
                 self.chat_agent.handle_message,
@@ -161,6 +183,7 @@ class Sorabot(commands.Bot):
                 message.author.display_name,
                 message.channel.name,
                 str(message.author.id),
+                openrouter_key,
             )
 
         if response:

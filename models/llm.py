@@ -10,22 +10,31 @@ import os
 from openai import OpenAI
 
 class LLMClient:
-    def __init__(self, model="openai/gpt-4o-mini"):
+    def __init__(self, model="openai/gpt-4o-mini", api_key: str | None = None, base_url: str | None = None):
+        """
+        LLM client wrapper.
+
+        - If `api_key` is provided, it will be used. Otherwise fallback to environment variables.
+        - If `base_url` is provided, it will be passed to the OpenAI client (used for OpenRouter).
+        """
         openrouter_key = os.getenv("OPENROUTER_API_KEY")
         openai_key = os.getenv("OPENAI_API_KEY")
-        api_key = openrouter_key or openai_key
+        resolved_key = api_key or openrouter_key or openai_key
 
-        if not api_key:
-            raise RuntimeError(
-                "OpenAI API key not found. Set OPENAI_API_KEY or OPENROUTER_API_KEY in your environment or .env"
-            )
+        self.model = model
+        self.client = None
 
-        client_kwargs = {"api_key": api_key}
-        if openrouter_key:
+        if not resolved_key:
+            return
+
+        client_kwargs = {"api_key": resolved_key}
+
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        elif openrouter_key or (api_key and api_key.startswith("sk-or-")):
             client_kwargs["base_url"] = "https://openrouter.ai/api/v1"
 
         self.client = OpenAI(**client_kwargs)
-        self.model = model
 
     def set_model(self, model):
         """
@@ -45,10 +54,19 @@ class LLMClient:
         """
         return self.client
 
+    def is_configured(self) -> bool:
+        """
+        Return True when an API key is configured.
+        """
+        return self.client is not None
+
     def chat(self, messages, temperature=0.2):
         """
         Send a message to the LLM and get the response.
         """
+        if self.client is None:
+            return "OpenRouter API key is not configured."
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
