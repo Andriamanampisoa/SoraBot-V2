@@ -22,9 +22,24 @@ async def delete_command(interaction: discord.Interaction, number_of_message: in
         plural = "s" if deleted_count != 1 else ""
         await interaction.followup.send(f"{deleted_count} message{plural} deleted.", ephemeral=True)
 
+    except discord.Forbidden:
+        message = "I can't delete messages here because I don't have access to the channel or the required permissions."
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+
     except commands.MissingPermissions:
-        await interaction.followup.send("You do not have permission to use this command.", ephemeral=True)
+        message = "You do not have permission to use this command."
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
 
 @delete_command.error
 async def delete_command_perm_handling(interaction: discord.Interaction, error):
-    await interaction.response.send_message("An error occurred.", ephemeral=True)
+    message = "An error occurred while running /delete."
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
