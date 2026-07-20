@@ -211,6 +211,71 @@ class Sorabot(commands.Bot):
 
         return True
 
+    def _build_environment_context(self, message: discord.Message) -> str:
+        """
+        Build a compact description of the bot's identity and Discord surroundings for the LLM.
+        """
+        bot_user = self.user
+        lines = [
+            "=== Identité ===",
+            f"Nom affiché: {bot_user.display_name if bot_user else 'SoraBot'}",
+            f"Username: {bot_user.name if bot_user else 'SoraBot'}",
+            f"ID Discord: {bot_user.id if bot_user else 'inconnu'}",
+            f"Version: {self.version}",
+            "Nature: bot Discord conversationnel et agent engineering/GitHub",
+        ]
+
+        guild = message.guild
+        if guild is not None:
+            lines.extend(
+                [
+                    "",
+                    "=== Serveur ===",
+                    f"Nom: {guild.name}",
+                    f"ID: {guild.id}",
+                    f"Membres (approx.): {guild.member_count if guild.member_count is not None else 'inconnu'}",
+                ]
+            )
+            other_bots = [
+                member.display_name
+                for member in guild.members
+                if member.bot and (bot_user is None or member.id != bot_user.id)
+            ]
+            if other_bots:
+                shown = other_bots[:15]
+                suffix = f" (+{len(other_bots) - len(shown)} autres)" if len(other_bots) > len(shown) else ""
+                lines.append(f"Autres bots présents: {', '.join(shown)}{suffix}")
+
+        channel = message.channel
+        lines.extend(["", "=== Salon ===", f"Nom: #{getattr(channel, 'name', 'DM')}"])
+        topic = getattr(channel, "topic", None)
+        if topic:
+            lines.append(f"Sujet: {topic}")
+        category = getattr(channel, "category", None)
+        if category is not None:
+            lines.append(f"Catégorie: {category.name}")
+
+        author = message.author
+        lines.extend(
+            [
+                "",
+                "=== Interlocuteur ===",
+                f"Nom affiché: {author.display_name}",
+                f"Username: {getattr(author, 'name', author.display_name)}",
+                f"ID: {author.id}",
+                f"Type: {'bot' if author.bot else 'humain'}",
+            ]
+        )
+        if isinstance(author, discord.Member):
+            role_names = [role.name for role in author.roles if role.name != "@everyone"]
+            if role_names:
+                lines.append(f"Rôles: {', '.join(role_names[-8:])}")
+
+        if message.reference and message.reference.message_id:
+            lines.append("Contexte: ce message est une réponse à un autre message")
+
+        return "\n".join(lines)
+
     async def on_message(self, message):
         """
         Handle incoming messages.
@@ -248,6 +313,8 @@ class Sorabot(commands.Bot):
                 await self.process_commands(message)
             return
 
+        environment_context = self._build_environment_context(message)
+
         async with message.channel.typing():
             response = await asyncio.to_thread(
                 self.chat_agent.handle_message,
@@ -256,6 +323,7 @@ class Sorabot(commands.Bot):
                 message.channel.name,
                 str(message.author.id),
                 openrouter_key,
+                environment_context,
             )
 
         if response:

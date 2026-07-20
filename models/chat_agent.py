@@ -35,6 +35,7 @@ class AgentState(TypedDict, total=False):
     channel_name: str
     user_id: str
     api_key: Optional[str]
+    environment_context: str
     conversation_history: list[dict]
     request_type: str
     target_repo: str
@@ -47,6 +48,15 @@ class AgentState(TypedDict, total=False):
     github_pr_url: Optional[str]
     execution_log: str
     response: str
+
+
+SELF_AWARENESS_INSTRUCTIONS = (
+    "Tu as conscience de ton identité et de ton environnement Discord. "
+    "Le bloc \"Contexte environnement\" décrit qui tu es, le serveur, le salon et ton interlocuteur. "
+    "Utilise ces informations quand c'est pertinent, sans les réciter systématiquement. "
+    "Si ton interlocuteur est un autre bot, reste coopératif, clair, et évite les échanges stériles. "
+    "Ne prétends pas voir ou faire des choses hors de ce contexte et de tes capacités réelles."
+)
 
 class DiscordChatAgent:
     """
@@ -86,8 +96,15 @@ class DiscordChatAgent:
         graph.add_edge("draft_response", END)
         return graph.compile()
 
-    def handle_message(self, message: str, author_name: str, channel_name: str,
-            user_id: Optional[str] = None, api_key: Optional[str] = None) -> str:
+    def handle_message(
+        self,
+        message: str,
+        author_name: str,
+        channel_name: str,
+        user_id: Optional[str] = None,
+        api_key: Optional[str] = None,
+        environment_context: Optional[str] = None,
+    ) -> str:
         """
         Main entry point to handle an incoming message and generate a response.
         """
@@ -101,6 +118,7 @@ class DiscordChatAgent:
             "channel_name": channel_name,
             "user_id": user_id,
             "api_key": api_key,
+            "environment_context": environment_context or "",
             "conversation_history": conversation_history,
             "execution_log": "",
         }
@@ -508,6 +526,7 @@ class DiscordChatAgent:
         repository_snapshot = state.get("repository_snapshot", "")
         execution_log = state.get("execution_log", "")
         conversation_history = state.get("conversation_history", [])
+        environment_context = state.get("environment_context", "")
 
         prompt = self._build_response_prompt(
             request_type=request_type,
@@ -517,6 +536,7 @@ class DiscordChatAgent:
             repository_snapshot=repository_snapshot,
             execution_log=execution_log,
             conversation_history=conversation_history,
+            environment_context=environment_context,
         )
 
         api_key = state.get("api_key")
@@ -527,26 +547,41 @@ class DiscordChatAgent:
             response += f"\nBranch: {state['github_branch']}"
         return {**state, "response": response}
 
-    def _build_general_assistance_prompt(self, message: str, author_name: str, channel_name: str, 
-        conversation_history: list[dict] | None = None) -> list[dict]:
+    def _format_history_context(self, conversation_history: list[dict]) -> str:
+        if not conversation_history:
+            return ""
+
+        history_lines = ["=== Historique de la conversation ==="]
+        for msg in conversation_history[-5:]:
+            role_display = "Utilisateur" if msg.get("role") == "user" else "SoraBot"
+            content = msg.get("content", "")
+            if len(content) > 150:
+                content = content[:150] + "..."
+            history_lines.append(f"{role_display}: {content}")
+        return "\n".join(history_lines) + "\n\n"
+
+    def _format_environment_block(self, environment_context: str) -> str:
+        if not environment_context.strip():
+            return ""
+        return f"=== Contexte environnement ===\n{environment_context.strip()}\n\n"
+
+    def _build_general_assistance_prompt(
+        self,
+        message: str,
+        author_name: str,
+        channel_name: str,
+        conversation_history: list[dict] | None = None,
+        environment_context: str = "",
+    ) -> list[dict]:
         """
         Build a prompt for general assistance requests.
         """
         if conversation_history is None:
             conversation_history = []
-        history_context = ""
-        if conversation_history:
-            history_lines = ["=== Historique de la conversation ==="]
-            for msg in conversation_history[-5:]:
-                role_display = "Utilisateur" if msg.get("role") == "user" else "SoraBot"
-                content = msg.get("content", "")
-                if len(content) > 150:
-                    content = content[:150] + "..."
-                history_lines.append(f"{role_display}: {content}")
-            history_context = "\n".join(history_lines) + "\n\n"
 
         user_content = (
-            f"{history_context}"
+            f"{self._format_history_context(conversation_history)}"
+            f"{self._format_environment_block(environment_context)}"
             f"Auteur: {author_name}\n"
             f"Canal: {channel_name}\n"
             f"Message: {message}"
@@ -560,7 +595,8 @@ class DiscordChatAgent:
                     "Réponds en français, clairement, naturellement, et sans jargon inutile. "
                     "Si l'utilisateur pose une question simple, réponds simplement. "
                     "Si la demande est technique, structure la réponse avec des étapes concrètes. "
-                    "Utilise le contexte de la conversation précédente pour des réponses cohérentes."
+                    "Utilise le contexte de la conversation précédente pour des réponses cohérentes. "
+                    f"{SELF_AWARENESS_INSTRUCTIONS}"
                 ),
             },
             {
@@ -578,23 +614,14 @@ class DiscordChatAgent:
         repository_snapshot: str,
         execution_log: str,
         conversation_history: list[dict] | None = None,
+        environment_context: str = "",
     ) -> list[dict]:
         if conversation_history is None:
             conversation_history = []
 
-        history_context = ""
-        if conversation_history:
-            history_lines = ["=== Historique de la conversation ==="]
-            for msg in conversation_history[-5:]:
-                role_display = "Utilisateur" if msg.get("role") == "user" else "SoraBot"
-                content = msg.get("content", "")
-                if len(content) > 150:
-                    content = content[:150] + "..."
-                history_lines.append(f"{role_display}: {content}")
-            history_context = "\n".join(history_lines) + "\n\n"
-
         user_content = (
-            f"{history_context}"
+            f"{self._format_history_context(conversation_history)}"
+            f"{self._format_environment_block(environment_context)}"
             f"Auteur: {author_name}\n"
             f"Canal: {channel_name}\n"
             f"Type de demande: {request_type}\n"
@@ -610,7 +637,8 @@ class DiscordChatAgent:
                     "Tu es SoraBot, un agent orienté engineering et GitHub. "
                     "Réponds en français, de manière concise, professionnelle et actionnable. "
                     "Explique ce qui a été fait, ce qui reste à faire, et les risques éventuels. "
-                    "Utilise le contexte de la conversation précédente pour des réponses cohérentes."
+                    "Utilise le contexte de la conversation précédente pour des réponses cohérentes. "
+                    f"{SELF_AWARENESS_INSTRUCTIONS}"
                 ),
             },
             {
@@ -628,13 +656,20 @@ class DiscordChatAgent:
         repository_snapshot: str,
         execution_log: str,
         conversation_history: list[dict] | None = None,
+        environment_context: str = "",
     ) -> list[dict]:
         """Build the final LLM prompt, keeping general chat and GitHub-assisted replies distinct."""
         if conversation_history is None:
             conversation_history = []
 
         if request_type == "general_assistance":
-            return self._build_general_assistance_prompt(message, author_name, channel_name, conversation_history)
+            return self._build_general_assistance_prompt(
+                message,
+                author_name,
+                channel_name,
+                conversation_history,
+                environment_context,
+            )
 
         return self._build_github_assistance_prompt(
             request_type=request_type,
@@ -644,6 +679,7 @@ class DiscordChatAgent:
             repository_snapshot=repository_snapshot,
             execution_log=execution_log,
             conversation_history=conversation_history,
+            environment_context=environment_context,
         )
 
     def _extract_intent_with_llm(
