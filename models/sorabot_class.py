@@ -21,6 +21,11 @@ from models.guild_config_store import GuildConfigStore
 from models.llm import LLMClient
 from models.token_store import TokenStore
 
+# Max replies we will send to other bots in a row (per channel) before requiring a human message.
+MAX_CONSECUTIVE_BOT_REPLIES = 3
+# Max consecutive bot authors when walking up a reply chain (including the incoming message).
+MAX_BOT_REPLY_CHAIN_DEPTH = 3
+
 class Sorabot(commands.Bot):
     def __init__(self, version):
         super().__init__(command_prefix="!", intents = discord.Intents.all())
@@ -29,6 +34,8 @@ class Sorabot(commands.Bot):
         self.chat_agent = DiscordChatAgent(self.llm_client)
         self.token_store = TokenStore()
         self.config_store = GuildConfigStore()
+        # channel_id -> how many times we have replied to a bot since the last human message
+        self._bot_reply_streak: dict[int, int] = {}
 
     async def setup_hook(self):
         """
@@ -152,18 +159,82 @@ class Sorabot(commands.Bot):
         print(f"{self.user.display_name} is ready.")
         await self._announce_startup()
 
+    async def _resolve_referenced_message(self, message: discord.Message) -> discord.Message | None:
+        """
+        Resolve the parent message of a reply, from cache or via fetch.
+        """
+        if not message.reference or not message.reference.message_id:
+            return None
+
+        resolved = message.reference.resolved
+        if isinstance(resolved, discord.Message):
+            return resolved
+
+        try:
+            return await message.channel.fetch_message(message.reference.message_id)
+        except discord.HTTPException:
+            return None
+
+    async def _bot_reply_chain_depth(self, message: discord.Message) -> int:
+        """
+        Count consecutive bot authors walking up the reply chain, including this message.
+        """
+        depth = 0
+        current: discord.Message | None = message
+        seen: set[int] = set()
+
+        while current is not None and current.author.bot:
+            if current.id in seen:
+                break
+            seen.add(current.id)
+            depth += 1
+            if depth > MAX_BOT_REPLY_CHAIN_DEPTH:
+                break
+            current = await self._resolve_referenced_message(current)
+
+        return depth
+
+    async def _should_reply_to_bot_message(self, message: discord.Message) -> bool:
+        """
+        Decide whether we may reply to another bot without risking an infinite loop.
+        """
+        if not (message.content or "").strip():
+            return False
+
+        streak = self._bot_reply_streak.get(message.channel.id, 0)
+        if streak >= MAX_CONSECUTIVE_BOT_REPLIES:
+            return False
+
+        depth = await self._bot_reply_chain_depth(message)
+        if depth > MAX_BOT_REPLY_CHAIN_DEPTH:
+            return False
+
+        return True
+
     async def on_message(self, message):
         """
         Handle incoming messages.
+
+        Replies to humans and other bots in the dedicated chat channel.
+        Own messages are ignored. Bot-to-bot exchanges are capped to avoid loops.
         """
-        if message.author.bot:
+        if self.user and message.author.id == self.user.id:
             return
 
         guild_id = message.guild.id if message.guild else None
         bot_chat_channel_id = self._get_guild_setting_int(guild_id, "bot_chat_channel_id", "BOT_CHAT_CHANNEL_ID")
-        if not bot_chat_channel_id or message.channel.id != bot_chat_channel_id:
-            await self.process_commands(message)
+        in_bot_chat = bool(bot_chat_channel_id and message.channel.id == bot_chat_channel_id)
+
+        if not in_bot_chat:
+            if not message.author.bot:
+                await self.process_commands(message)
             return
+
+        if message.author.bot:
+            if not await self._should_reply_to_bot_message(message):
+                return
+        else:
+            self._bot_reply_streak[message.channel.id] = 0
 
         openrouter_key = self._get_openrouter_api_key(guild_id)
 
@@ -173,7 +244,8 @@ class Sorabot(commands.Bot):
                 f"The OpenRouter API key is not configured for {guild_label}.",
                 mention_author=False,
             )
-            await self.process_commands(message)
+            if not message.author.bot:
+                await self.process_commands(message)
             return
 
         async with message.channel.typing():
@@ -188,8 +260,13 @@ class Sorabot(commands.Bot):
 
         if response:
             await message.reply(response[:2000], mention_author=False)
+            if message.author.bot:
+                self._bot_reply_streak[message.channel.id] = (
+                    self._bot_reply_streak.get(message.channel.id, 0) + 1
+                )
 
-        await self.process_commands(message)
+        if not message.author.bot:
+            await self.process_commands(message)
 
     async def on_member_join(self, member):
         """
@@ -223,4 +300,4 @@ class Sorabot(commands.Bot):
         if role is not None:
             await member.add_roles(role)
 
-sora_bot = Sorabot("v1.1.0")
+sora_bot = Sorabot("v1.1.1")
