@@ -20,11 +20,18 @@ from models.chat_agent import DiscordChatAgent
 from models.guild_config_store import GuildConfigStore
 from models.llm import LLMClient
 from models.token_store import TokenStore
+from models.discord_event_tools import parse_iso_datetime
 
 # Max replies we will send to other bots in a row (per channel) before requiring a human message.
 MAX_CONSECUTIVE_BOT_REPLIES = 3
 # Max consecutive bot authors when walking up a reply chain (including the incoming message).
 MAX_BOT_REPLY_CHAIN_DEPTH = 3
+
+ENTITY_TYPE_MAP = {
+    "external": discord.EntityType.external,
+    "voice": discord.EntityType.voice,
+    "stage": discord.EntityType.stage_instance,
+}
 
 class Sorabot(commands.Bot):
     def __init__(self, version):
@@ -255,6 +262,29 @@ class Sorabot(commands.Bot):
         if category is not None:
             lines.append(f"Catégorie: {category.name}")
 
+        if guild is not None:
+            voice_channels = [
+                f"#{voice_channel.name} ({voice_channel.id})"
+                for voice_channel in guild.voice_channels[:12]
+            ]
+            stage_channels = [
+                f"#{stage_channel.name} ({stage_channel.id})"
+                for stage_channel in guild.stage_channels[:8]
+            ]
+            if voice_channels or stage_channels:
+                lines.append("")
+                lines.append("=== Salons pour events vocaux/stage ===")
+                if voice_channels:
+                    lines.append(f"Vocaux: {', '.join(voice_channels)}")
+                if stage_channels:
+                    lines.append(f"Stages: {', '.join(stage_channels)}")
+            lines.append("")
+            lines.append("=== Capacités événement ===")
+            lines.append(
+                "Tu peux préparer des Scheduled Events Discord (externe avec lieu, vocal, ou stage). "
+                "La création réelle est effectuée par le bot si les infos sont complètes."
+            )
+
         author = message.author
         lines.extend(
             [
@@ -275,6 +305,96 @@ class Sorabot(commands.Bot):
             lines.append("Contexte: ce message est une réponse à un autre message")
 
         return "\n".join(lines)
+
+    async def _create_scheduled_event(
+        self,
+        guild: discord.Guild,
+        payload: dict,
+        *,
+        reason: str | None = None,
+    ) -> discord.ScheduledEvent:
+        """
+        Create a Discord guild scheduled event from an agent payload.
+        """
+        name = (payload.get("name") or "").strip()
+        if not name:
+            raise ValueError("Event name is required.")
+
+        start_time = parse_iso_datetime(payload.get("start_time"))
+        if start_time is None:
+            raise ValueError("Event start_time is invalid.")
+
+        end_time = parse_iso_datetime(payload.get("end_time"))
+        entity_key = str(payload.get("entity_type") or "external").lower()
+        entity_type = ENTITY_TYPE_MAP.get(entity_key, discord.EntityType.external)
+        description = payload.get("description") or None
+        location = (payload.get("location") or "").strip() or None
+        channel = None
+
+        if entity_type in (discord.EntityType.voice, discord.EntityType.stage_instance):
+            channel_id = payload.get("channel_id")
+            if not channel_id:
+                raise ValueError("A voice/stage channel is required for this event type.")
+            channel = guild.get_channel(int(channel_id))
+            if channel is None:
+                raise ValueError(f"Channel `{channel_id}` was not found on this server.")
+            location = None
+        else:
+            if not location:
+                raise ValueError("A location is required for external events.")
+            if end_time is None:
+                raise ValueError("An end time is required for external events.")
+            channel = None
+
+        me = guild.me
+        if me is None or not me.guild_permissions.manage_events:
+            raise PermissionError(
+                "I need the **Manage Events** permission to create Discord scheduled events."
+            )
+
+        return await guild.create_scheduled_event(
+            name=name[:100],
+            description=(description[:1000] if description else discord.utils.MISSING),
+            start_time=start_time,
+            end_time=end_time if end_time is not None else discord.utils.MISSING,
+            entity_type=entity_type,
+            privacy_level=discord.PrivacyLevel.guild_only,
+            location=location if location else discord.utils.MISSING,
+            channel=channel if channel is not None else discord.utils.MISSING,
+            reason=reason,
+        )
+
+    async def _append_event_creation_result(
+        self,
+        message: discord.Message,
+        response: str,
+        pending_event: dict | None,
+    ) -> str:
+        """
+        Create a pending scheduled event on the guild and append the outcome to the reply.
+        """
+        if not pending_event or message.guild is None:
+            return response
+
+        try:
+            event = await self._create_scheduled_event(
+                message.guild,
+                pending_event,
+                reason=f"Requested by {message.author} via SoraBot chat",
+            )
+        except PermissionError as exc:
+            return f"{response}\n\n{exc}"
+        except (ValueError, discord.HTTPException, discord.Forbidden) as exc:
+            return f"{response}\n\nCould not create the Discord event: {exc}"
+
+        event_url = getattr(event, "url", None) or (
+            f"https://discord.com/events/{message.guild.id}/{event.id}"
+        )
+        return (
+            f"{response}\n\n"
+            f"Discord event created: **{event.name}**\n"
+            f"{event_url}"
+        )
 
     async def on_message(self, message):
         """
@@ -316,7 +436,7 @@ class Sorabot(commands.Bot):
         environment_context = self._build_environment_context(message)
 
         async with message.channel.typing():
-            response = await asyncio.to_thread(
+            agent_result = await asyncio.to_thread(
                 self.chat_agent.handle_message,
                 message.content,
                 message.author.display_name,
@@ -325,6 +445,16 @@ class Sorabot(commands.Bot):
                 openrouter_key,
                 environment_context,
             )
+
+        if isinstance(agent_result, dict):
+            response = agent_result.get("response") or ""
+            pending_event = agent_result.get("pending_discord_event")
+        else:
+            response = agent_result or ""
+            pending_event = None
+
+        if response or pending_event:
+            response = await self._append_event_creation_result(message, response, pending_event)
 
         if response:
             await message.reply(response[:2000], mention_author=False)
@@ -368,4 +498,4 @@ class Sorabot(commands.Bot):
         if role is not None:
             await member.add_roles(role)
 
-sora_bot = Sorabot("v1.1.1")
+sora_bot = Sorabot("v1.1.2")

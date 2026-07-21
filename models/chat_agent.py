@@ -28,6 +28,14 @@ from models.conversation_memory import ConversationMemory
 from models.llm import LLMClient
 from models.github_tools import GitHubTools
 from models.github_exceptions import GitHubAuthenticationError
+from models.discord_event_tools import (
+    describe_missing_fields,
+    format_event_summary,
+    is_event_ready,
+    missing_event_fields,
+    normalize_event_payload,
+    search_web,
+)
 
 class AgentState(TypedDict, total=False):
     message: str
@@ -43,6 +51,8 @@ class AgentState(TypedDict, total=False):
     target_branch: str
     target_pr_numbers: list[int]
     target_pr_title: str
+    event_draft: dict
+    pending_discord_event: dict
     repository_snapshot: str
     github_branch: Optional[str]
     github_pr_url: Optional[str]
@@ -55,8 +65,17 @@ SELF_AWARENESS_INSTRUCTIONS = (
     "Le bloc \"Contexte environnement\" décrit qui tu es, le serveur, le salon et ton interlocuteur. "
     "Utilise ces informations quand c'est pertinent, sans les réciter systématiquement. "
     "Si ton interlocuteur est un autre bot, reste coopératif, clair, et évite les échanges stériles. "
-    "Ne prétends pas voir ou faire des choses hors de ce contexte et de tes capacités réelles."
+    "Ne prétends pas voir ou faire des choses hors de ce contexte et de tes capacités réelles. "
+    "Tu peux créer des événements Discord planifiés (Scheduled Events) quand on te le demande: "
+    "événements externes avec lieu, ou vocaux/stage si un salon est précisé. "
+    "Si des informations manquent, pose des questions précises avant de créer."
 )
+
+EVENT_REQUEST_TYPES = {
+    "create_discord_event",
+    "research_event",
+    "confirm_discord_event",
+}
 
 class DiscordChatAgent:
     """
@@ -104,9 +123,13 @@ class DiscordChatAgent:
         user_id: Optional[str] = None,
         api_key: Optional[str] = None,
         environment_context: Optional[str] = None,
-    ) -> str:
+    ) -> dict:
         """
-        Main entry point to handle an incoming message and generate a response.
+        Main entry point to handle an incoming message.
+
+        Returns a dict with:
+        - response: text reply for Discord
+        - pending_discord_event: optional payload for the bot to create a scheduled event
         """
         if not user_id:
             user_id = author_name
@@ -121,11 +144,17 @@ class DiscordChatAgent:
             "environment_context": environment_context or "",
             "conversation_history": conversation_history,
             "execution_log": "",
+            "event_draft": {},
+            "pending_discord_event": {},
         }
         result = self.workflow.invoke(state)
         response = result.get("response", "")
+        pending_event = result.get("pending_discord_event") or {}
         self.memory.add_exchange(user_id, message.strip(), response)
-        return response
+        return {
+            "response": response,
+            "pending_discord_event": pending_event if pending_event else None,
+        }
 
     def _classify_request(self, state: AgentState) -> AgentState:
         """
@@ -139,10 +168,54 @@ class DiscordChatAgent:
             api_key=state.get("api_key"),
         )
         request_type = llm_intent.get("request_type")
+        event_draft = normalize_event_payload(llm_intent.get("event") or {})
 
         if not request_type:
             lowered = message.lower()
-            if any(keyword in lowered for keyword in ["créer pr", "pull request", "merge request", "ouvrir une pr"]):
+            wants_event_create = any(
+                keyword in lowered
+                for keyword in [
+                    "créer un event",
+                    "creer un event",
+                    "crée un event",
+                    "cree un event",
+                    "créer un événement",
+                    "creer un evenement",
+                    "crée un événement",
+                    "cree un evenement",
+                    "planifie un event",
+                    "planifier un event",
+                    "scheduled event",
+                    "crée l'event",
+                    "cree l'event",
+                    "créer l'événement",
+                    "creer l'evenement",
+                ]
+            )
+            wants_event_research = any(
+                keyword in lowered
+                for keyword in [
+                    "trouve moi quand",
+                    "trouve quand",
+                    "recherche l'événement",
+                    "recherche l'evenement",
+                    "quand se déroule",
+                    "quand se deroule",
+                    "à quelle date",
+                    "a quelle date",
+                ]
+            )
+            if wants_event_create and wants_event_research:
+                request_type = "create_discord_event"
+                event_draft = normalize_event_payload({**event_draft, "needs_research": True})
+            elif wants_event_create:
+                request_type = "create_discord_event"
+            elif wants_event_research:
+                request_type = "research_event"
+            elif any(keyword in lowered for keyword in ["oui", "ok", "confirme", "vas-y", "crée-le", "cree-le", "go"]):
+                if self._history_mentions_event_proposal(conversation_history):
+                    request_type = "confirm_discord_event"
+            elif any(keyword in lowered for keyword in ["créer pr", "pull request", "merge request", "ouvrir une pr"]):
                 request_type = "create_pr"
             elif any(keyword in lowered for keyword in ["branche", "créer branche", "nouvelle branche"]):
                 request_type = "create_branch"
@@ -187,7 +260,32 @@ class DiscordChatAgent:
             "target_branch": target_branch,
             "target_pr_numbers": target_pr_numbers,
             "target_pr_title": target_pr_title,
+            "event_draft": event_draft,
         }
+
+    def _history_mentions_event_proposal(self, conversation_history: list[dict]) -> bool:
+        """
+        Detect whether the recent history contains an event draft awaiting confirmation.
+        """
+        for msg in reversed(conversation_history[-6:]):
+            content = (msg.get("content") or "").lower()
+            if msg.get("role") != "assistant":
+                continue
+            if any(
+                marker in content
+                for marker in (
+                    "événement proposé",
+                    "evenement propose",
+                    "je peux créer l'événement",
+                    "je peux creer l'evenement",
+                    "confirmes-tu",
+                    "confirmes tu",
+                    "draft événement",
+                    "draft evenement",
+                )
+            ):
+                return True
+        return False
 
     def _collect_context(self, state: AgentState) -> AgentState:
         """
@@ -453,9 +551,16 @@ class DiscordChatAgent:
 
     def _execute_action(self, state: AgentState) -> AgentState:
         """
-        Execute GitHub operations if needed based on request type.
+        Execute operations if needed based on request type.
         """
         request_type = state.get("request_type", "general_assistance")
+
+        if request_type in EVENT_REQUEST_TYPES:
+            return self._execute_discord_event_action(state)
+
+        if request_type == "general_assistance":
+            return {**state, "execution_log": "", "pending_discord_event": {}}
+
         execution_log = ""
         github_tools, repo_owner, repo_name, setup_error = self._get_github_tools(state)
 
@@ -516,6 +621,156 @@ class DiscordChatAgent:
             execution_log = f"Execution error: {str(e)}"
         return {**state, "execution_log": execution_log}
 
+    def _execute_discord_event_action(self, state: AgentState) -> AgentState:
+        """
+        Research and/or prepare a Discord scheduled event payload.
+        """
+        request_type = state.get("request_type", "create_discord_event")
+        event_draft = normalize_event_payload(state.get("event_draft") or {})
+        api_key = state.get("api_key")
+        message = state.get("message", "")
+        conversation_history = state.get("conversation_history", [])
+
+        research_notes = ""
+        if request_type == "research_event" or event_draft.get("needs_research"):
+            query = event_draft.get("research_query") or event_draft.get("name") or message
+            research_notes = search_web(query)
+            researched = self._extract_event_from_research(
+                query=query,
+                research_notes=research_notes,
+                existing_draft=event_draft,
+                api_key=api_key,
+            )
+            event_draft = normalize_event_payload({**event_draft, **researched})
+
+        if request_type == "confirm_discord_event":
+            history_draft = self._extract_event_from_history(
+                conversation_history,
+                api_key=api_key,
+            )
+            event_draft = normalize_event_payload({**history_draft, **event_draft, "confirmed": True})
+
+        missing = missing_event_fields(event_draft)
+        pending_event: dict = {}
+
+        if is_event_ready(event_draft) and (
+            request_type == "create_discord_event"
+            or request_type == "confirm_discord_event"
+            or event_draft.get("confirmed")
+        ):
+            pending_event = {
+                "name": event_draft["name"],
+                "description": event_draft.get("description"),
+                "start_time": event_draft["start_time"],
+                "end_time": event_draft.get("end_time"),
+                "entity_type": event_draft.get("entity_type") or "external",
+                "location": event_draft.get("location"),
+                "channel_id": event_draft.get("channel_id"),
+            }
+            execution_log = (
+                "Discord event ready to create.\n"
+                f"{format_event_summary(pending_event)}"
+            )
+        elif is_event_ready(event_draft) and request_type == "research_event":
+            execution_log = (
+                "Research complete. Event proposal ready, waiting for confirmation.\n"
+                f"{format_event_summary(event_draft)}\n"
+                f"Research notes:\n{research_notes}"
+            )
+        else:
+            execution_log = (
+                "Incomplete event information.\n"
+                f"Current draft:\n{format_event_summary(event_draft)}\n"
+                f"Missing fields: {describe_missing_fields(missing)}"
+            )
+            if research_notes:
+                execution_log += f"\nResearch notes:\n{research_notes}"
+
+        return {
+            **state,
+            "event_draft": event_draft,
+            "pending_discord_event": pending_event,
+            "execution_log": execution_log,
+        }
+
+    def _extract_event_from_research(
+        self,
+        *,
+        query: str,
+        research_notes: str,
+        existing_draft: dict,
+        api_key: Optional[str],
+    ) -> dict:
+        """
+        Use the LLM to turn web research notes into a structured event draft.
+        """
+        prompt = [
+            {
+                "role": "system",
+                "content": (
+                    "Tu extrais les détails d'un événement réel à partir de notes de recherche. "
+                    "Réponds uniquement en JSON strict. "
+                    "Schéma: {"
+                    '"name":"string|null",'
+                    '"description":"string|null",'
+                    '"start_time":"ISO-8601|null",'
+                    '"end_time":"ISO-8601|null",'
+                    '"entity_type":"external|voice|stage",'
+                    '"location":"string|null",'
+                    '"channel_id":null,'
+                    '"confirmed":false'
+                    "}. "
+                    "Fuseau horaire par défaut: Europe/Paris. "
+                    "Si l'année n'est pas claire, préfère l'occurrence la plus proche dans le futur. "
+                    "Pour un lieu physique, entity_type=external. "
+                    "Si la recherche web a échoué, tu peux utiliser tes connaissances avec prudence; "
+                    "mets null dès qu'une info n'est pas fiable."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Requête: {query}\n\n"
+                    f"Draft existant:\n{format_event_summary(existing_draft)}\n\n"
+                    f"Notes de recherche:\n{research_notes}"
+                ),
+            },
+        ]
+        response = self._chat_with_llm(prompt, temperature=0, api_key=api_key)
+        return parse_json_object((response or "").strip())
+
+    def _extract_event_from_history(
+        self,
+        conversation_history: list[dict],
+        *,
+        api_key: Optional[str],
+    ) -> dict:
+        """
+        Recover an event draft previously proposed in the conversation.
+        """
+        history_text = self._format_history_context(conversation_history) or "(vide)"
+        prompt = [
+            {
+                "role": "system",
+                "content": (
+                    "À partir de l'historique, reconstitue le draft d'événement Discord déjà proposé. "
+                    "Réponds uniquement en JSON strict avec le schéma: "
+                    "{"
+                    '"name":"string|null",'
+                    '"description":"string|null",'
+                    '"start_time":"ISO-8601|null",'
+                    '"end_time":"ISO-8601|null",'
+                    '"entity_type":"external|voice|stage",'
+                    '"location":"string|null",'
+                    '"channel_id":null'
+                    "}."
+                ),
+            },
+            {"role": "user", "content": history_text},
+        ]
+        response = self._chat_with_llm(prompt, temperature=0, api_key=api_key)
+        return parse_json_object((response or "").strip())
+
     def _draft_response(self, state: AgentState) -> AgentState:
         """
         Draft a response to the user based on the request type, message, context, and execution results.
@@ -527,6 +782,8 @@ class DiscordChatAgent:
         execution_log = state.get("execution_log", "")
         conversation_history = state.get("conversation_history", [])
         environment_context = state.get("environment_context", "")
+        event_draft = state.get("event_draft") or {}
+        pending_event = state.get("pending_discord_event") or {}
 
         prompt = self._build_response_prompt(
             request_type=request_type,
@@ -537,6 +794,8 @@ class DiscordChatAgent:
             execution_log=execution_log,
             conversation_history=conversation_history,
             environment_context=environment_context,
+            event_draft=event_draft,
+            pending_discord_event=pending_event,
         )
 
         api_key = state.get("api_key")
@@ -647,6 +906,57 @@ class DiscordChatAgent:
             },
         ]
 
+    def _build_event_assistance_prompt(
+        self,
+        request_type: str,
+        message: str,
+        author_name: str,
+        channel_name: str,
+        execution_log: str,
+        event_draft: dict,
+        pending_discord_event: dict,
+        conversation_history: list[dict] | None = None,
+        environment_context: str = "",
+    ) -> list[dict]:
+        if conversation_history is None:
+            conversation_history = []
+
+        missing = missing_event_fields(event_draft)
+        user_content = (
+            f"{self._format_history_context(conversation_history)}"
+            f"{self._format_environment_block(environment_context)}"
+            f"Auteur: {author_name}\n"
+            f"Canal: {channel_name}\n"
+            f"Type de demande: {request_type}\n"
+            f"Message: {message}\n\n"
+            f"Draft événement:\n{format_event_summary(event_draft)}\n"
+            f"Champs manquants: {describe_missing_fields(missing) if missing else 'aucun'}\n"
+            f"Création imminente: {'oui' if pending_discord_event else 'non'}\n\n"
+            f"Résultat exécution:\n{execution_log if execution_log else '(pas d\'action)'}"
+        )
+
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "Tu es SoraBot, capable de créer des événements Discord planifiés. "
+                    "Réponds en français, clairement et brièvement. "
+                    "Si des champs manquent, pose uniquement les questions nécessaires. "
+                    "Si une recherche a produit une proposition complète mais non confirmée, "
+                    "présente le résumé sous le titre 'Événement proposé' et demande confirmation. "
+                    "Si la création est imminente (pending), confirme ce qui va être créé "
+                    "sans inventer d'URL Discord. "
+                    "Ne prétends jamais qu'un événement a déjà été créé côté Discord "
+                    "si 'Création imminente' vaut non. "
+                    f"{SELF_AWARENESS_INSTRUCTIONS}"
+                ),
+            },
+            {
+                "role": "user",
+                "content": user_content,
+            },
+        ]
+
     def _build_response_prompt(
         self,
         request_type: str,
@@ -657,8 +967,10 @@ class DiscordChatAgent:
         execution_log: str,
         conversation_history: list[dict] | None = None,
         environment_context: str = "",
+        event_draft: dict | None = None,
+        pending_discord_event: dict | None = None,
     ) -> list[dict]:
-        """Build the final LLM prompt, keeping general chat and GitHub-assisted replies distinct."""
+        """Build the final LLM prompt, keeping general chat, events, and GitHub replies distinct."""
         if conversation_history is None:
             conversation_history = []
 
@@ -669,6 +981,19 @@ class DiscordChatAgent:
                 channel_name,
                 conversation_history,
                 environment_context,
+            )
+
+        if request_type in EVENT_REQUEST_TYPES:
+            return self._build_event_assistance_prompt(
+                request_type=request_type,
+                message=message,
+                author_name=author_name,
+                channel_name=channel_name,
+                execution_log=execution_log,
+                event_draft=event_draft or {},
+                pending_discord_event=pending_discord_event or {},
+                conversation_history=conversation_history,
+                environment_context=environment_context,
             )
 
         return self._build_github_assistance_prompt(
@@ -710,20 +1035,37 @@ class DiscordChatAgent:
             {
                 "role": "system",
                 "content": (
-                    "Tu analyses une commande Discord pour un agent GitHub. "
+                    "Tu analyses une commande Discord pour SoraBot (GitHub + événements Discord). "
                     "Réponds uniquement en JSON strict, sans texte autour. "
                     "Schéma: "
                     "{"
-                    '"request_type": "create_pr|create_branch|list_open_prs|pr_status|pr_description|add_reviewer|bug_fix|merge_conflict|general_assistance", '
+                    '"request_type": "create_pr|create_branch|list_open_prs|pr_status|pr_description|add_reviewer|bug_fix|merge_conflict|create_discord_event|research_event|confirm_discord_event|general_assistance", '
                     '"target_owner": "string|null", '
                     '"target_repo": "string|null", '
-                    '"target_branch": "string|null"'
-                    ', '
-                    '"target_pr_numbers": [1, 2]'
-                    ', '
-                    '"target_pr_title": "string|null"'
+                    '"target_branch": "string|null", '
+                    '"target_pr_numbers": [1, 2], '
+                    '"target_pr_title": "string|null", '
+                    '"event": {'
+                    '"name":"string|null",'
+                    '"description":"string|null",'
+                    '"start_time":"ISO-8601 avec offset Europe/Paris si possible|null",'
+                    '"end_time":"ISO-8601|null",'
+                    '"entity_type":"external|voice|stage|null",'
+                    '"location":"string|null",'
+                    '"channel_id":"number|null",'
+                    '"needs_research":false,'
+                    '"research_query":"string|null",'
+                    '"confirmed":false'
+                    "}"
                     "}. "
-                    "Si une valeur est inconnue, mets null."
+                    "Règles événements: "
+                    "- Si l'utilisateur veut créer un événement Discord planifié => create_discord_event. "
+                    "- S'il demande seulement de trouver la date d'un événement réel => research_event. "
+                    "- S'il demande de trouver la date ET de créer l'événement => create_discord_event avec needs_research=true. "
+                    "- S'il confirme une proposition précédente (oui/ok/vas-y/crée-le) => confirm_discord_event. "
+                    "- Lieu physique => entity_type=external et renseigner location. "
+                    "- Dates relatives sans année: choisir la prochaine occurrence future, fuseau Europe/Paris. "
+                    "- Si une valeur est inconnue, mets null."
                 ),
             },
             {
@@ -747,6 +1089,7 @@ class DiscordChatAgent:
             "target_branch": data.get("target_branch") or None,
             "target_pr_numbers": data.get("target_pr_numbers") or None,
             "target_pr_title": data.get("target_pr_title") or None,
+            "event": data.get("event") if isinstance(data.get("event"), dict) else {},
         }
 
     def _generate_pr_metadata(self, pr_context: dict, state: AgentState) -> dict:
