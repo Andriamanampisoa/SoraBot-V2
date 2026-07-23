@@ -36,7 +36,10 @@ class GitHubTools:
         self.repo_path = Path(__file__).resolve().parents[1]
 
         if not self.github_token:
-            raise ValueError("GITHUB_TOKEN environment variable not set")
+            raise ValueError(
+                "No GitHub token available. Link one with `/link-github` "
+                "or set the GITHUB_TOKEN environment variable."
+            )
 
         try:
             self.gh = Github(self.github_token)

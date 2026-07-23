@@ -42,6 +42,7 @@ class AgentState(TypedDict, total=False):
     author_name: str
     channel_name: str
     user_id: str
+    discord_user_id: str
     api_key: Optional[str]
     environment_context: str
     conversation_history: list[dict]
@@ -123,11 +124,13 @@ class DiscordChatAgent:
         user_id: Optional[str] = None,
         api_key: Optional[str] = None,
         environment_context: Optional[str] = None,
+        discord_user_id: Optional[str] = None,
     ) -> dict:
         """
         Main entry point to handle an incoming message.
 
         ``user_id`` is an opaque conversation key (e.g. ``thread:{id}`` for forum posts).
+        ``discord_user_id`` is the Discord member id used for linked tokens (GitHub, etc.).
 
         Returns a dict with:
         - response: text reply for Discord
@@ -142,6 +145,7 @@ class DiscordChatAgent:
             "author_name": author_name,
             "channel_name": channel_name,
             "user_id": user_id,
+            "discord_user_id": discord_user_id or "",
             "api_key": api_key,
             "environment_context": environment_context or "",
             "conversation_history": conversation_history,
@@ -302,7 +306,8 @@ class DiscordChatAgent:
         """
         target_repo = state.get("target_repo", "")
         target_owner = state.get("target_owner", "")
-        user_id = state.get("user_id", "")
+
+        token_user_id = state.get("discord_user_id") or state.get("user_id", "")
 
         if not target_repo and not os.getenv("GITHUB_REPO_NAME"):
             return None, "", "", "Error: repository not specified. Use 'dans nom-du-repo' or 'pour owner/repo'."
@@ -311,7 +316,7 @@ class DiscordChatAgent:
         repo_owner = target_owner or os.getenv("GITHUB_REPO_OWNER", "")
 
         try:
-            return GitHubTools(repo_owner, repo_name, user_id=user_id), repo_owner, repo_name, ""
+            return GitHubTools(repo_owner, repo_name, user_id=token_user_id), repo_owner, repo_name, ""
         except GitHubAuthenticationError as exc:
             suggestion = (
                 f"\n\n**Suggestion:** Your current access to `{repo_owner}/{repo_name}` is insufficient.\n"

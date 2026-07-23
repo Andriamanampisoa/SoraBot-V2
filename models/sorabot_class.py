@@ -462,6 +462,7 @@ class Sorabot(commands.Bot):
                 conversation_id,
                 openrouter_key,
                 environment_context,
+                str(message.author.id),
             )
 
         if isinstance(agent_result, dict):
