@@ -11,7 +11,36 @@ import discord
 
 from discord import app_commands
 from discord.ext import commands
+from github import Github, GithubException
 from models.token_store import TokenStore
+
+RECOMMENDED_GITHUB_SCOPES = {"repo", "workflow"}
+
+
+def _inspect_github_token(token: str) -> tuple[str, list[str]]:
+    """
+    Validate a GitHub PAT and return (login, scopes).
+
+    Raises ValueError if the token is invalid or unusable.
+    """
+    token = (token or "").strip()
+    if not token:
+        raise ValueError("Token is empty.")
+
+    try:
+        gh = Github(token)
+        user = gh.get_user()
+        login = user.login
+        # oauth_scopes is populated after an authenticated request
+        scopes = list(gh.oauth_scopes or [])
+        return login, scopes
+    except GithubException as exc:
+        status = getattr(exc, "status", None)
+        if status in (401, 403):
+            raise ValueError("Invalid or unauthorized GitHub token.") from exc
+        raise ValueError(f"GitHub rejected this token: {exc}") from exc
+    except Exception as exc:
+        raise ValueError(f"Could not validate GitHub token: {exc}") from exc
 
 
 class TokenCommands(commands.Cog):
@@ -26,32 +55,44 @@ class TokenCommands(commands.Cog):
     @app_commands.command(name="link-github", description="Link your GitHub token to SoraBot")
     @app_commands.describe(token="Your GitHub personal access token (PAT)")
     async def link_github(self, interaction: discord.Interaction, token: str):
-        """Link GitHub token securely.
-
-        Args:
-            interaction: Discord interaction
-            token: GitHub personal access token (will be encrypted)
-        """
+        """Link GitHub token securely after validating it with GitHub."""
         await interaction.response.defer(ephemeral=True)
 
         user_id = str(interaction.user.id)
         user_name = interaction.user.display_name
 
         try:
-            # Save token (encrypted)
+            login, scopes = _inspect_github_token(token)
+            scope_set = set(scopes)
+            missing = sorted(RECOMMENDED_GITHUB_SCOPES - scope_set)
+
             self.token_store.save_token(
                 user_id=user_id,
                 service="github",
-                token=token,
-                scopes=["repo", "workflow"],
+                token=token.strip(),
+                scopes=scopes,
             )
 
-            await interaction.followup.send(
-                f"GitHub token linked successfully, {user_name}!\n"
-                f"Your token is encrypted and stored securely.\n"
-                f"SoraBot will now use your token for GitHub operations.",
-                ephemeral=True
-            )
+            lines = [
+                f"GitHub token linked successfully, {user_name}!",
+                f"Authenticated as **{login}**.",
+                f"Detected scopes: `{', '.join(scopes) if scopes else 'none (fine-grained token?)'}`",
+                "Your token is encrypted and stored securely.",
+            ]
+            if missing:
+                lines.extend(
+                    [
+                        "",
+                        f"Warning: missing recommended scopes: `{', '.join(missing)}`.",
+                        "For PRs on private repos, check the full **repo** scope.",
+                        "Add **workflow** if you need to touch GitHub Actions files.",
+                        "Create a new classic PAT, then run `/link-github` again.",
+                    ]
+                )
+            else:
+                lines.append("SoraBot will now use this token for your GitHub operations.")
+
+            await interaction.followup.send("\n".join(lines), ephemeral=True)
         except Exception as e:
             await interaction.followup.send(
                 f"Error: {str(e)}\n"
@@ -61,11 +102,7 @@ class TokenCommands(commands.Cog):
 
     @app_commands.command(name="unlink-github", description="Remove your GitHub token from SoraBot")
     async def unlink_github(self, interaction: discord.Interaction):
-        """Remove GitHub token.
-
-        Args:
-            interaction: Discord interaction
-        """
+        """Remove GitHub token."""
         await interaction.response.defer(ephemeral=True)
 
         user_id = str(interaction.user.id)
@@ -91,11 +128,7 @@ class TokenCommands(commands.Cog):
 
     @app_commands.command(name="my-tokens", description="View your linked service tokens (metadata only)")
     async def my_tokens(self, interaction: discord.Interaction):
-        """View linked tokens metadata (without showing actual tokens).
-
-        Args:
-            interaction: Discord interaction
-        """
+        """View linked tokens metadata (without showing actual tokens)."""
         await interaction.response.defer(ephemeral=True)
 
         user_id = str(interaction.user.id)
@@ -117,9 +150,6 @@ class TokenCommands(commands.Cog):
                 status = "Valid" if metadata["valid"] else "Expired/Invalid"
                 created = metadata.get("created_at", "Unknown")[:10]
                 scopes = ", ".join(metadata.get("scopes", [])) if metadata.get("scopes") else "N/A"
-                expires_at = metadata.get("expires_at", "Never")
-                if expires_at and expires_at != "Never":
-                    expires_at = expires_at[:10]  # Format YYYY-MM-DD
 
                 lines.append(
                     f"\n**{service.upper()}**\n"

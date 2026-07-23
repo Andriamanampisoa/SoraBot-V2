@@ -28,6 +28,7 @@ from models.conversation_memory import ConversationMemory
 from models.llm import LLMClient
 from models.github_tools import GitHubTools
 from models.github_exceptions import GitHubAuthenticationError
+from models.token_store import TokenStore
 from models.discord_event_tools import (
     describe_missing_fields,
     format_event_summary,
@@ -318,17 +319,36 @@ class DiscordChatAgent:
         try:
             return GitHubTools(repo_owner, repo_name, user_id=token_user_id), repo_owner, repo_name, ""
         except GitHubAuthenticationError as exc:
-            suggestion = (
-                f"\n\n**Suggestion:** Your current access to `{repo_owner}/{repo_name}` is insufficient.\n"
-                f"Would you like to link your own GitHub token? Here's how:\n\n"
-                f"**Step 1:** Create a personal GitHub token:\n"
-                f"→ Go to https://github.com/settings/tokens/new\n"
-                f"→ Select scopes: `repo`, `workflow`\n"
-                f"→ Copy the token\n\n"
-                f"**Step 2:** Link it to SoraBot:\n"
-                f"→ Use `/link-github <your_token>`\n\n"
-                f"Then try again!"
-            )
+            already_linked = False
+            if token_user_id:
+                try:
+                    already_linked = TokenStore().has_token(token_user_id, "github")
+                except Exception:
+                    already_linked = False
+
+            if already_linked:
+                suggestion = (
+                    f"\n\n**Suggestion:** A GitHub token is already linked for your Discord account, "
+                    f"but it cannot access `{repo_owner}/{repo_name}`.\n"
+                    f"Check that:\n"
+                    f"1. The GitHub account behind the token can push to that repository\n"
+                    f"2. Your classic PAT has the full **repo** scope (not only `public_repo`)\n"
+                    f"3. Add **workflow** if Actions files are involved\n\n"
+                    f"Then create a new token and run `/link-github` again "
+                    f"(or `/unlink-github` first)."
+                )
+            else:
+                suggestion = (
+                    f"\n\n**Suggestion:** Your current access to `{repo_owner}/{repo_name}` is insufficient.\n"
+                    f"Would you like to link your own GitHub token? Here's how:\n\n"
+                    f"**Step 1:** Create a personal GitHub token:\n"
+                    f"→ Go to https://github.com/settings/tokens/new\n"
+                    f"→ Select scopes: `repo`, `workflow`\n"
+                    f"→ Copy the token\n\n"
+                    f"**Step 2:** Link it to SoraBot:\n"
+                    f"→ Use `/link-github <your_token>`\n\n"
+                    f"Then try again!"
+                )
             error_msg = f"{exc.message}{suggestion}"
             return None, repo_owner, repo_name, error_msg
         except ValueError as exc:
