@@ -269,7 +269,7 @@ class DiscordChatAgent:
         """
         for msg in reversed(conversation_history[-6:]):
             content = (msg.get("content") or "").lower()
-            if msg.get("role") != "assistant":
+            if msg.get("role") not in ("assistant", "bot"):
                 continue
             if any(
                 marker in content
@@ -632,7 +632,9 @@ class DiscordChatAgent:
         conversation_history = state.get("conversation_history", [])
 
         research_notes = ""
+        did_research_this_turn = False
         if request_type == "research_event" or event_draft.get("needs_research"):
+            did_research_this_turn = True
             query = event_draft.get("research_query") or event_draft.get("name") or message
             research_notes = search_web(query)
             researched = self._extract_event_from_research(
@@ -653,11 +655,15 @@ class DiscordChatAgent:
         missing = missing_event_fields(event_draft)
         pending_event: dict = {}
 
-        if is_event_ready(event_draft) and (
-            request_type == "create_discord_event"
-            or request_type == "confirm_discord_event"
+        # After research, always propose first and wait for explicit confirmation.
+        # Immediate creation is only for create requests that already had full details.
+        should_create = is_event_ready(event_draft) and (
+            request_type == "confirm_discord_event"
             or event_draft.get("confirmed")
-        ):
+            or (request_type == "create_discord_event" and not did_research_this_turn)
+        )
+
+        if should_create:
             pending_event = {
                 "name": event_draft["name"],
                 "description": event_draft.get("description"),
@@ -671,12 +677,13 @@ class DiscordChatAgent:
                 "Discord event ready to create.\n"
                 f"{format_event_summary(pending_event)}"
             )
-        elif is_event_ready(event_draft) and request_type == "research_event":
+        elif is_event_ready(event_draft):
             execution_log = (
                 "Research complete. Event proposal ready, waiting for confirmation.\n"
-                f"{format_event_summary(event_draft)}\n"
-                f"Research notes:\n{research_notes}"
+                f"{format_event_summary(event_draft)}"
             )
+            if research_notes:
+                execution_log += f"\nResearch notes:\n{research_notes}"
         else:
             execution_log = (
                 "Incomplete event information.\n"
@@ -1061,7 +1068,7 @@ class DiscordChatAgent:
                     "Règles événements: "
                     "- Si l'utilisateur veut créer un événement Discord planifié => create_discord_event. "
                     "- S'il demande seulement de trouver la date d'un événement réel => research_event. "
-                    "- S'il demande de trouver la date ET de créer l'événement => create_discord_event avec needs_research=true. "
+                    "- S'il demande de trouver la date ET de créer l'événement => create_discord_event avec needs_research=true (recherche puis proposition, création seulement après confirm_discord_event). "
                     "- S'il confirme une proposition précédente (oui/ok/vas-y/crée-le) => confirm_discord_event. "
                     "- Lieu physique => entity_type=external et renseigner location. "
                     "- Dates relatives sans année: choisir la prochaine occurrence future, fuseau Europe/Paris. "
