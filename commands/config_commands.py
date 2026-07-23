@@ -57,7 +57,7 @@ def _display_role(guild: discord.Guild | None, value: str | None) -> str:
 
 CONFIG_REMOVABLE_SETTINGS = [
     app_commands.Choice(name="Welcome channel", value="welcome_channel_id"),
-    app_commands.Choice(name="Bot chat channel", value="bot_chat_channel_id"),
+    app_commands.Choice(name="Bot chat forum", value="bot_chat_channel_id"),
     app_commands.Choice(name="Startup announcement channel", value="startup_announcement_channel_id"),
     app_commands.Choice(name="Welcome role", value="welcome_role_id"),
     app_commands.Choice(name="OpenRouter API key", value="openrouter_api_key"),
@@ -78,7 +78,7 @@ def build_config_embed(guild: discord.Guild | None, config: dict[str, str]) -> d
         inline=False,
     )
     embed.add_field(
-        name="Bot chat channel",
+        name="Bot chat forum",
         value=_display_channel(guild, config.get("bot_chat_channel_id")),
         inline=False,
     )
@@ -109,8 +109,14 @@ class ConfigChannelSelect(discord.ui.ChannelSelect):
         cog: "ServerConfigCommands",
         setting_key: str,
         placeholder: str,
+        channel_types: list[discord.ChannelType] | None = None,
     ):
-        super().__init__(placeholder=placeholder, min_values=1, max_values=1, channel_types=[discord.ChannelType.text])
+        super().__init__(
+            placeholder=placeholder,
+            min_values=1,
+            max_values=1,
+            channel_types=channel_types or [discord.ChannelType.text],
+        )
         self.cog = cog
         self.setting_key = setting_key
 
@@ -196,7 +202,8 @@ class ConfigSetupView(discord.ui.View):
             ConfigChannelSelect(
                 cog=self.cog,
                 setting_key="bot_chat_channel_id",
-                placeholder="Select bot chat channel",
+                placeholder="Select bot chat forum",
+                channel_types=[discord.ChannelType.forum],
             )
         )
         self.add_item(
@@ -247,7 +254,8 @@ class ServerConfigCommands(commands.Cog):
         embed = build_config_embed(interaction.guild, config)
         embed.title = "Server Setup Assistant"
         embed.description = (
-            "Use the selectors below to configure the bot channels and role.\n"
+            "Use the selectors below to configure the bot channels, forum, and role.\n"
+            "Bot chat uses a forum: each post is a separate conversation with the bot.\n"
             "Changes are saved immediately to the encrypted SQLite database."
         )
 
@@ -288,13 +296,13 @@ class ServerConfigCommands(commands.Cog):
         embed = build_config_embed(interaction.guild, self.config_store.get_guild_config(str(interaction.guild.id)))
         await interaction.response.send_message("Welcome channel updated.", embed=embed, ephemeral=True)
 
-    @config.command(name="set-bot-chat-channel", description="Set the bot chat channel")
+    @config.command(name="set-bot-chat-channel", description="Set the bot chat forum")
     @app_commands.guild_only()
     @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.describe(channel="The bot chat channel for the server")
-    async def config_set_bot_chat_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+    @app_commands.describe(channel="The forum where bot chat posts live")
+    async def config_set_bot_chat_channel(self, interaction: discord.Interaction, channel: discord.ForumChannel):
         """
-        Set the bot chat channel for the server.
+        Set the bot chat forum for the server.
         """
         if interaction.guild is None:
             await interaction.response.send_message("This command must be used in a server.", ephemeral=True)
@@ -302,7 +310,7 @@ class ServerConfigCommands(commands.Cog):
 
         self.config_store.update_setting(str(interaction.guild.id), "bot_chat_channel_id", str(channel.id))
         embed = build_config_embed(interaction.guild, self.config_store.get_guild_config(str(interaction.guild.id)))
-        await interaction.response.send_message("Bot chat channel updated.", embed=embed, ephemeral=True)
+        await interaction.response.send_message("Bot chat forum updated.", embed=embed, ephemeral=True)
 
     @config.command(name="set-startup-channel", description="Set the startup announcement channel")
     @app_commands.guild_only()

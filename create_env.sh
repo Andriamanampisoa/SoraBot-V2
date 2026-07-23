@@ -10,11 +10,12 @@ TOKEN=your_bot_token_here
 OPENROUTER_API_KEY=your_openrouter_api_key_here
 ENCRYPTION_KEY=your_fernet_encryption_key_here
 
-#Chanel and role IDs
+#Channel and role IDs
 WELCOME_CHANNEL_ID=welcome_channel_id_here
 BOT_CHANNEL_ID=bot_channel_id_here
 ROLE_ID=role_id_here
-BOT_CHAT_CHANNEL_ID=bot_chat_channel_id_here
+# Forum channel ID used for bot chat posts (each post = one conversation)
+BOT_CHAT_CHANNEL_ID=bot_chat_forum_channel_id_here
 
 # GitHub configuration
 GITHUB_TOKEN=your_github_token_here

@@ -7,7 +7,7 @@ SoraBot-V2 is intended to serve as a Discord entry point to an AI agent ecosyste
 - Interactive server configuration assistant (`/setup`) with Discord selectors for channels and roles
 - Fine-grained `config` commands to view, set, remove, and reset server settings
 - Token management utilities for secure storage and access control of tokens
-- Conversation memory support to persist lightweight session state per user or guild
+- Conversation memory support to persist lightweight session state per forum post
 - Modular command structure to make adding or updating commands straightforward
 
 ## Primary commands (examples)
@@ -17,7 +17,7 @@ The bot exposes several slash commands and helper commands. Main commands includ
 - `/setup` — open the interactive configuration assistant
 - `/config show` — display the server's current configuration
 - `/config set-welcome-channel` — set the welcome channel
-- `/config set-bot-chat-channel` — set the bot chat channel
+- `/config set-bot-chat-channel` — set the bot chat forum (each post is a separate conversation)
 - `/config set-startup-channel` — set the startup announcement channel
 - `/config set-welcome-role` — set the welcome role
 - `/config remove` — remove a specific configuration key

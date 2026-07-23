@@ -127,6 +127,8 @@ class DiscordChatAgent:
         """
         Main entry point to handle an incoming message.
 
+        ``user_id`` is an opaque conversation key (e.g. ``thread:{id}`` for forum posts).
+
         Returns a dict with:
         - response: text reply for Discord
         - pending_discord_event: optional payload for the bot to create a scheduled event

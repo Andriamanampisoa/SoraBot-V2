@@ -255,12 +255,23 @@ class Sorabot(commands.Bot):
 
         channel = message.channel
         lines.extend(["", "=== Salon ===", f"Nom: #{getattr(channel, 'name', 'DM')}"])
+        if isinstance(channel, discord.Thread):
+            parent = channel.parent
+            lines.append("Type: post forum" if isinstance(parent, discord.ForumChannel) else "Type: fil")
+            lines.append(f"ID du fil: {channel.id}")
+            if parent is not None:
+                lines.append(f"Salon parent: #{parent.name} ({parent.id})")
+            lines.append("Mémoire: conversation scopée à ce post/fil (partagée entre participants)")
         topic = getattr(channel, "topic", None)
         if topic:
             lines.append(f"Sujet: {topic}")
         category = getattr(channel, "category", None)
         if category is not None:
             lines.append(f"Catégorie: {category.name}")
+        elif isinstance(channel, discord.Thread) and channel.parent is not None:
+            parent_category = getattr(channel.parent, "category", None)
+            if parent_category is not None:
+                lines.append(f"Catégorie: {parent_category.name}")
 
         if guild is not None:
             voice_channels = [
@@ -400,7 +411,7 @@ class Sorabot(commands.Bot):
         """
         Handle incoming messages.
 
-        Replies to humans and other bots in the dedicated chat channel.
+        Replies to humans and other bots inside posts of the configured bot chat forum.
         Own messages are ignored. Bot-to-bot exchanges are capped to avoid loops.
         """
         if self.user and message.author.id == self.user.id:
@@ -408,7 +419,12 @@ class Sorabot(commands.Bot):
 
         guild_id = message.guild.id if message.guild else None
         bot_chat_channel_id = self._get_guild_setting_int(guild_id, "bot_chat_channel_id", "BOT_CHAT_CHANNEL_ID")
-        in_bot_chat = bool(bot_chat_channel_id and message.channel.id == bot_chat_channel_id)
+        channel = message.channel
+        in_bot_chat = bool(
+            bot_chat_channel_id
+            and isinstance(channel, discord.Thread)
+            and channel.parent_id == bot_chat_channel_id
+        )
 
         if not in_bot_chat:
             if not message.author.bot:
@@ -434,14 +450,16 @@ class Sorabot(commands.Bot):
             return
 
         environment_context = self._build_environment_context(message)
+        conversation_id = f"thread:{channel.id}"
+        prefixed_content = f"[{message.author.display_name}]: {message.content}"
 
         async with message.channel.typing():
             agent_result = await asyncio.to_thread(
                 self.chat_agent.handle_message,
-                message.content,
+                prefixed_content,
                 message.author.display_name,
                 message.channel.name,
-                str(message.author.id),
+                conversation_id,
                 openrouter_key,
                 environment_context,
             )

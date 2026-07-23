@@ -2,7 +2,8 @@
 ## SORABOT, 2026
 ## conversation_memory.py
 ## File description:
-## The ConversationMemory class to manage conversation history per user with automatic cleanup and persistence.
+## The ConversationMemory class to manage conversation history per conversation
+## key (e.g. forum post / thread) with automatic cleanup and persistence.
 ##
 
 from __future__ import annotations
@@ -14,7 +15,8 @@ from typing import Optional
 
 class ConversationMemory:
     """
-    Manage conversation history per Discord user with automatic cleanup.
+    Manage conversation history keyed by an opaque conversation id
+    (typically ``thread:{discord_thread_id}`` for forum posts).
     Stores messages in memory and persists to disk for durability.
     """
 
@@ -23,11 +25,13 @@ class ConversationMemory:
         self.memory_dir.mkdir(exist_ok=True)
         self.max_age_days = max_age_days
         self.max_messages_per_user = max_messages_per_user
-        self._in_memory_cache = {}  # {user_id: [(role, content, timestamp), ...]}
+        self._in_memory_cache = {}  # {conversation_id: [message dict, ...]}
 
     def add_exchange(self, user_id: str, user_message: str, bot_response: str) -> None:
         """
         Store a user message and bot response in conversation history.
+
+        ``user_id`` is treated as an opaque conversation key (e.g. ``thread:123``).
         """
         user_key = self._sanitize_user_id(user_id)
         timestamp = datetime.now().isoformat()
@@ -52,7 +56,7 @@ class ConversationMemory:
 
     def get_context(self, user_id: str, max_messages: int = 10) -> str:
         """
-        Retrieve formatted conversation context for a user (last N messages).
+        Retrieve formatted conversation context for a conversation key (last N messages).
         """
         user_key = self._sanitize_user_id(user_id)
         messages = self._load_messages(user_key)
@@ -97,7 +101,7 @@ class ConversationMemory:
 
     def clear_user_memory(self, user_id: str) -> None:
         """
-        Clear all conversation history for a user
+        Clear all conversation history for a conversation key.
         """
         user_key = self._sanitize_user_id(user_id)
 
@@ -110,7 +114,7 @@ class ConversationMemory:
 
     def _sanitize_user_id(self, user_id: str) -> str:
         """
-        Sanitize user ID for use as filename.
+        Sanitize a conversation key for use as filename.
         """
         return str(user_id).replace(":", "_").replace("/", "_").replace("\\", "_")
 
